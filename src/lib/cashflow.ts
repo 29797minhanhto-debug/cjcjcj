@@ -13,7 +13,7 @@ export interface Settings {
   flex: BudgetItem[];
   saving: SavingItem[];
 }
-export interface Spend { amount: number; at: string }
+export interface Spend { amount: number; at: string; id?: string }
 export interface CycleItem { id: string; name: string; budget: number; spends: Spend[] }
 export interface Cycle {
   start: string;
@@ -24,7 +24,14 @@ export interface Cycle {
 }
 export interface Fund { id: string; name: string; amount: number }
 export interface HistoryEntry { start: string; end: string; budget: number; spent: number; saved: number; returned: number }
+export type LogKind = "income" | "expense";
+/** Journal of every income/expense entered. `ref` links an expense to its item in the live cycle. */
+export interface LogEntry { id: string; kind: LogKind; amount: number; at: string; label: string; ref?: { group: "fixed" | "flex"; item: string } }
+/** Total balance snapshot typed in by the user. */
+export interface BalancePoint { id: string; at: string; amount: number }
 export interface AppState {
+  log: LogEntry[];
+  balances: BalancePoint[];
   settings: Settings;
   buffer: number;
   funds: Fund[];
@@ -73,6 +80,8 @@ export const resetData = (settings: Settings): AppState => ({
   incomes: [],
   cycle: null,
   history: [],
+  log: [],
+  balances: [],
 });
 
 export const defaultState = (): AppState => resetData(defaultSettings());
@@ -154,11 +163,101 @@ type Group = "fixed" | "flex";
 const mapItem = (st: AppState, g: Group, id: string, fn: (i: CycleItem) => CycleItem): AppState =>
   st.cycle ? { ...st, cycle: { ...st.cycle, [g]: st.cycle[g].map((i) => (i.id === id ? fn(i) : i)) } } : st;
 
-export const addSpend = (st: AppState, g: Group, id: string, amount: number, now = new Date()) =>
-  amount > 0 ? mapItem(st, g, id, (i) => ({ ...i, spends: [{ amount, at: now.toISOString() }, ...i.spends] })) : st;
+export function addSpend(st: AppState, g: Group, id: string, amount: number, now = new Date()): AppState {
+  const item = st.cycle?.[g].find((i) => i.id === id);
+  if (!item || amount <= 0) return st;
+  const sid = uid();
+  const at = now.toISOString();
+  const next = mapItem(st, g, id, (i) => ({ ...i, spends: [{ amount, at, id: sid }, ...i.spends] }));
+  return { ...next, log: sortLog([{ id: sid, kind: "expense", amount, at, label: item.name, ref: { group: g, item: id } }, ...st.log]) };
+}
 
-export const removeSpend = (st: AppState, g: Group, id: string, index: number) =>
-  mapItem(st, g, id, (i) => ({ ...i, spends: i.spends.filter((_, j) => j !== index) }));
+export function removeSpend(st: AppState, g: Group, id: string, index: number): AppState {
+  const sid = st.cycle?.[g].find((i) => i.id === id)?.spends[index]?.id;
+  const next = mapItem(st, g, id, (i) => ({ ...i, spends: i.spends.filter((_, j) => j !== index) }));
+  return sid ? { ...next, log: next.log.filter((l) => l.id !== sid) } : next;
+}
+
+/* ---------- Income + journal: editing a log entry keeps the buffer / live cycle in sync ---------- */
+const sortLog = (l: LogEntry[]) => [...l].sort((a, b) => b.at.localeCompare(a.at));
+
+export function addIncome(st: AppState, amount: number, now = new Date()): AppState {
+  if (amount <= 0) return st;
+  const id = uid();
+  const at = now.toISOString();
+  return {
+    ...st,
+    buffer: st.buffer + amount,
+    incomes: [{ amount, at, id }, ...st.incomes],
+    log: sortLog([{ id, kind: "income", amount, at, label: "Nạp Quỹ Đệm" }, ...st.log]),
+  };
+}
+
+export function updateLog(st: AppState, id: string, patch: { amount: number; at: string }): AppState {
+  const e = st.log.find((l) => l.id === id);
+  if (!e) return st;
+  const amount = Math.max(0, Math.round(patch.amount || 0));
+  const at = patch.at;
+  const log = sortLog(st.log.map((l) => (l.id === id ? { ...l, amount, at } : l)));
+  const fix = (sp: Spend) => (sp.id === id ? { ...sp, amount, at } : sp);
+  if (e.kind === "income") {
+    return { ...st, log, buffer: st.buffer + amount - e.amount, incomes: st.incomes.map(fix) };
+  }
+  const next = e.ref ? mapItem(st, e.ref.group, e.ref.item, (i) => ({ ...i, spends: i.spends.map(fix) })) : st;
+  return { ...next, log };
+}
+
+export function removeLog(st: AppState, id: string): AppState {
+  const e = st.log.find((l) => l.id === id);
+  if (!e) return st;
+  const log = st.log.filter((l) => l.id !== id);
+  if (e.kind === "income") {
+    return { ...st, log, buffer: st.buffer - e.amount, incomes: st.incomes.filter((x) => x.id !== id) };
+  }
+  const next = e.ref ? mapItem(st, e.ref.group, e.ref.item, (i) => ({ ...i, spends: i.spends.filter((x) => x.id !== id) })) : st;
+  return { ...next, log };
+}
+
+/** Sum of incomes and expenses whose time falls in [from, to] (inclusive local dates). */
+export function rangeTotals(log: LogEntry[], from: Date, to: Date) {
+  const a = startOfDay(from).getTime();
+  const b = startOfDay(to).getTime() + 86400000;
+  let income = 0, expense = 0;
+  for (const l of log) {
+    const t = new Date(l.at).getTime();
+    if (t < a || t >= b) continue;
+    if (l.kind === "income") income += l.amount; else expense += l.amount;
+  }
+  return { income, expense };
+}
+
+export const inRange = (at: string, from: Date, to: Date) => {
+  const t = new Date(at).getTime();
+  return t >= startOfDay(from).getTime() && t < startOfDay(to).getTime() + 86400000;
+};
+
+const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
+/* ---------- Total balance snapshots (typed by the user) ---------- */
+const sortBal = (l: BalancePoint[]) => [...l].sort((a, b) => a.at.localeCompare(b.at));
+export const upsertBalance = (st: AppState, p: { id?: string; at: string; amount: number }): AppState => {
+  const amount = Math.round(p.amount || 0);
+  const balances = p.id && st.balances.some((b) => b.id === p.id)
+    ? st.balances.map((b) => (b.id === p.id ? { ...b, at: p.at, amount } : b))
+    : [...st.balances, { id: uid(), at: p.at, amount }];
+  return { ...st, balances: sortBal(balances) };
+};
+export const removeBalance = (st: AppState, id: string): AppState => ({ ...st, balances: st.balances.filter((b) => b.id !== id) });
+
+/** Local "YYYY-MM-DDTHH:mm" for datetime-local inputs. */
+export const toDateTimeInput = (d: Date) => `${toDateInput(d)}T${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+export const fromDateTimeInput = (s: string) => {
+  const [date, time = "00:00"] = s.split("T");
+  const d = fromDateInput(date!);
+  const [h, m] = time.split(":").map(Number);
+  d.setHours(h || 0, m || 0);
+  return d;
+};
 
 /** Quick "đã trả đủ": records the remaining amount of a fixed item as one payment. */
 export function payRemainder(st: AppState, id: string, now = new Date()): AppState {
@@ -231,15 +330,26 @@ export function normalizeState(raw: any): AppState {
     id: String(f.id), name: String(f.name), budget: Number(f.budget) || 0,
     spends: Array.isArray(f.spends) ? f.spends : f.paid ? [{ amount: Number(f.budget) || 0, at: start }] : [],
   });
+  const withId = (sp: Spend): Spend => (sp.id ? sp : { ...sp, id: uid() });
+  const incomes = (st.incomes ?? []).map(withId);
+  const cycle = st.cycle
+    ? { ...st.cycle, fixed: st.cycle.fixed.map(fixItem(st.cycle.start)), flex: st.cycle.flex.map(fixItem(st.cycle.start)) }
+    : null;
+  if (cycle) for (const g of ["fixed", "flex"] as const) cycle[g] = cycle[g].map((i) => ({ ...i, spends: i.spends.map(withId) }));
+  // Older data had no journal: rebuild it from incomes and the live cycle's payments.
+  const log: LogEntry[] = Array.isArray(st.log) ? st.log : sortLog([
+    ...incomes.map((x): LogEntry => ({ id: x.id!, kind: "income", amount: x.amount, at: x.at, label: "Nạp Quỹ Đệm" })),
+    ...(cycle ? (["fixed", "flex"] as const).flatMap((g) => cycle[g].flatMap((i) => i.spends.map((x): LogEntry => ({ id: x.id!, kind: "expense", amount: x.amount, at: x.at, label: i.name, ref: { group: g, item: i.id } })))) : []),
+  ]);
   return {
     ...st,
     settings,
     funds: st.funds ?? [],
-    incomes: st.incomes ?? [],
+    incomes,
     history: st.history ?? [],
-    cycle: st.cycle
-      ? { ...st.cycle, fixed: st.cycle.fixed.map(fixItem(st.cycle.start)), flex: st.cycle.flex.map(fixItem(st.cycle.start)) }
-      : null,
+    cycle,
+    log,
+    balances: Array.isArray(st.balances) ? st.balances : [],
   };
 }
 
@@ -247,7 +357,7 @@ export function normalizeState(raw: any): AppState {
 export function toBackup(st: AppState) {
   const s = st.settings;
   const item = (i: BudgetItem) => ({ mã: i.id, tên: i.name, số_tiền: i.amount });
-  const spends = (l: Spend[]) => l.map((x) => ({ thời_điểm: x.at, số_tiền: x.amount }));
+  const spends = (l: Spend[]) => l.map((x) => ({ mã: x.id, thời_điểm: x.at, số_tiền: x.amount }));
   return {
     loại_tệp: "SAO LƯU DÒNG TIỀN CÁ NHÂN",
     phiên_bản: 2,
@@ -272,6 +382,8 @@ export function toBackup(st: AppState) {
         }
       : null,
     các_lần_nạp_quỹ_đệm: spends(st.incomes),
+    nhật_ký_thu_chi: st.log.map((l) => ({ mã: l.id, loại: l.kind === "income" ? "thu" : "chi", tên: l.label, thời_điểm: l.at, số_tiền: l.amount, ...(l.ref ? { nhóm: l.ref.group, mục: l.ref.item } : {}) })),
+    tổng_số_dư: st.balances.map((b) => ({ mã: b.id, thời_điểm: b.at, số_tiền: b.amount })),
     lịch_sử_chu_kỳ: st.history.map((h) => ({
       bắt_đầu: h.start, kết_thúc: h.end, ngân_sách: h.budget, đã_chi: h.spent, tích_lũy: h.saved, hoàn_về_quỹ_đệm: h.returned,
     })),
@@ -283,7 +395,7 @@ export function fromBackup(b: any): AppState {
   if (!b || !b.cài_đặt) throw new Error("Tệp không hợp lệ");
   const c = b.cài_đặt;
   const item = (i: any): BudgetItem => ({ id: String(i.mã ?? uid()), name: String(i.tên), amount: Number(i.số_tiền) || 0 });
-  const spends = (l: any): Spend[] => (Array.isArray(l) ? l : []).map((x: any) => ({ at: x.thời_điểm, amount: Number(x.số_tiền) || 0 }));
+  const spends = (l: any): Spend[] => (Array.isArray(l) ? l : []).map((x: any) => ({ at: x.thời_điểm, amount: Number(x.số_tiền) || 0, ...(x.mã ? { id: String(x.mã) } : {}) }));
   const settings: Settings = {
     cycleDays: Number(c.số_ngày_chu_kỳ) || 7,
     initialBuffer: Number(c.số_dư_khởi_tạo_quỹ_đệm) || 0,
@@ -299,7 +411,13 @@ export function fromBackup(b: any): AppState {
     const list = f.các_lần_chi ? spends(f.các_lần_chi) : f.đã_trả ? [{ at: cy.bắt_đầu, amount: budget }] : [];
     return { id: String(f.mã), name: String(f.tên), budget, spends: list };
   };
-  return {
+  const hasLog = Array.isArray(b.nhật_ký_thu_chi);
+  const restored: AppState = {
+    log: hasLog ? b.nhật_ký_thu_chi.map((l: any): LogEntry => ({
+      id: String(l.mã ?? uid()), kind: l.loại === "thu" ? "income" : "expense", label: String(l.tên ?? ""), at: l.thời_điểm, amount: Number(l.số_tiền) || 0,
+      ...(l.nhóm && l.mục ? { ref: { group: l.nhóm, item: String(l.mục) } } : {}),
+    })) : [],
+    balances: (b.tổng_số_dư ?? []).map((x: any) => ({ id: String(x.mã ?? uid()), at: x.thời_điểm, amount: Number(x.số_tiền) || 0 })),
     settings,
     buffer: Number(b.quỹ_đệm?.số_dư_hiện_tại) || 0,
     funds: (b.các_quỹ_tích_lũy ?? []).map((f: any) => ({ id: String(f.mã), name: String(f.tên), amount: Number(f.số_dư) || 0 })),
@@ -315,5 +433,6 @@ export function fromBackup(b: any): AppState {
       : null,
     history: (b.lịch_sử_chu_kỳ ?? []).map((h: any) => ({ start: h.bắt_đầu, end: h.kết_thúc, budget: +h.ngân_sách || 0, spent: +h.đã_chi || 0, saved: +h.tích_lũy || 0, returned: +h.hoàn_về_quỹ_đệm || 0 })),
   };
+  return hasLog ? restored : normalizeState({ ...restored, log: undefined });
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
