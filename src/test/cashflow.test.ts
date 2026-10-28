@@ -99,3 +99,73 @@ describe("cycle end date", () => {
     expect(cycleEnd(new Date(2026, 9, 1), 7).getDate()).toBe(7);
   });
 });
+
+import { addIncome, rangeTotals, removeLog, removeSpend, updateLog, upsertBalance, removeBalance } from "@/lib/cashflow";
+describe("journal", () => {
+  const base = () => { const s = defaultState(); s.settings.fixed = [{ id: "f", name: "F", amount: 100000 }]; s.settings.flex = []; s.settings.saving = []; return startCycle(s); };
+
+  it("income and expense are both logged", () => {
+    let st = addIncome(base(), 50000, new Date(2026, 9, 1, 9));
+    st = addSpend(st, "fixed", "f", 20000, new Date(2026, 9, 1, 10));
+    expect(st.log.map((l) => [l.kind, l.amount])).toEqual([["expense", 20000], ["income", 50000]]);
+  });
+
+  it("editing an income shifts the buffer by the difference; deleting removes it", () => {
+    const st0 = base();
+    let st = addIncome(st0, 50000);
+    const id = st.log[0]!.id;
+    st = updateLog(st, id, { amount: 80000, at: st.log[0]!.at });
+    expect(st.buffer).toBe(st0.buffer + 80000);
+    st = removeLog(st, id);
+    expect(st.buffer).toBe(st0.buffer);
+    expect(st.incomes).toHaveLength(0);
+  });
+
+  it("editing/deleting a logged expense updates the live cycle", () => {
+    let st = addSpend(base(), "fixed", "f", 20000);
+    const id = st.log[0]!.id;
+    st = updateLog(st, id, { amount: 30000, at: st.log[0]!.at });
+    expect(cycleStats(st.cycle!).fixedPaid).toBe(30000);
+    st = removeLog(st, id);
+    expect(cycleStats(st.cycle!).fixedPaid).toBe(0);
+  });
+
+  it("deleting a payment from the cycle also removes it from the journal", () => {
+    let st = addSpend(base(), "fixed", "f", 20000);
+    st = removeSpend(st, "fixed", "f", 0);
+    expect(st.log).toHaveLength(0);
+  });
+
+  it("range totals include both end dates", () => {
+    let st = addIncome(base(), 100, new Date(2026, 9, 1, 0, 1));
+    st = addIncome(st, 200, new Date(2026, 9, 3, 23, 59));
+    st = addSpend(st, "fixed", "f", 50, new Date(2026, 9, 4, 8));
+    expect(rangeTotals(st.log, new Date(2026, 9, 1), new Date(2026, 9, 3))).toEqual({ income: 300, expense: 0 });
+    expect(rangeTotals(st.log, new Date(2026, 9, 1), new Date(2026, 9, 4))).toEqual({ income: 300, expense: 50 });
+  });
+
+  it("balance points are kept in time order and editable", () => {
+    let st = upsertBalance(defaultState(), { at: new Date(2026, 9, 5).toISOString(), amount: 500 });
+    st = upsertBalance(st, { at: new Date(2026, 9, 1).toISOString(), amount: 300 });
+    expect(st.balances.map((b) => b.amount)).toEqual([300, 500]);
+    st = upsertBalance(st, { id: st.balances[0]!.id, at: st.balances[0]!.at, amount: 350 });
+    expect(st.balances[0]!.amount).toBe(350);
+    st = removeBalance(st, st.balances[0]!.id);
+    expect(st.balances).toHaveLength(1);
+  });
+
+  it("old data without a journal gets one rebuilt from incomes and cycle payments", () => {
+    const st = addSpend(addIncome(base(), 1000), "fixed", "f", 200);
+    const old = JSON.parse(JSON.stringify(st));
+    delete old.log; delete old.balances;
+    const n = normalizeState(old);
+    expect(n.log.map((l) => l.amount).sort()).toEqual([1000, 200].sort());
+    expect(n.balances).toEqual([]);
+  });
+
+  it("backup round-trips journal and balances", () => {
+    let st = addSpend(addIncome(base(), 1000), "fixed", "f", 200);
+    st = upsertBalance(st, { at: new Date(2026, 9, 1).toISOString(), amount: 5 });
+    expect(fromBackup(JSON.parse(JSON.stringify(toBackup(st))))).toEqual(st);
+  });
+});
