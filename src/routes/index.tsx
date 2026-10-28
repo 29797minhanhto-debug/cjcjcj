@@ -1,10 +1,12 @@
 import { Button } from "@/components/ui/button";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useCallback, useMemo, useState } from "react";
-import { ChevronDown, Plus, Settings, X } from "lucide-react";
+import { BarChart3, ChevronDown, History, Plus, Settings, X } from "lucide-react";
+import { HistoryPanel } from "@/components/HistoryPanel";
+import { StatsPanel } from "@/components/StatsPanel";
 import { AmountSheet } from "@/components/AmountSheet";
 import {
-  addSpend, closeCycle, cycleEnd, cycleRemainingDays, cycleStats, fmt, fmtDate, itemSpent, planCycle, removeSpend, startCycle, sum,
+  addIncome, addSpend, closeCycle, cycleEnd, cycleRemainingDays, cycleStats, fmt, fmtDate, itemSpent, planCycle, removeSpend, startCycle, sum,
   type CycleItem,
 } from "@/lib/cashflow";
 import { setState, useAppState } from "@/lib/store";
@@ -30,6 +32,8 @@ function Home() {
   const st = useAppState();
   const [sheet, setSheet] = useState<SheetState>(null);
   const [confirmClose, setConfirmClose] = useState(false);
+  const [panel, setPanel] = useState<null | "history" | "stats">(null);
+  const closePanel = useCallback(() => setPanel(null), []);
   const fixedOptions = useMemo(() => st?.cycle?.fixed.map((f) => ({ id: f.id, name: f.name })) ?? [], [st?.cycle]);
   const flexOptions = useMemo(() => st?.cycle?.flex.map((f) => ({ id: f.id, name: f.name })) ?? [], [st?.cycle]);
   const close = useCallback(() => setSheet(null), []);
@@ -63,7 +67,11 @@ function Home() {
     <main className="mx-auto min-h-screen max-w-md px-4 pb-10 pt-[max(1rem,env(safe-area-inset-top))]">
       <header className="flex h-12 items-center justify-between">
         <h1 className="text-lg font-bold">Dòng Tiền</h1>
-        <Link to="/settings" aria-label="Cài đặt" className="card-flat flex h-10 w-10 items-center justify-center text-muted-foreground"><Settings size={20} /></Link>
+        <div className="flex items-center gap-2">
+          <Button variant="flat" size="flat" aria-label="Lịch sử thu chi" onClick={() => setPanel("history")} className="card-flat flex h-10 w-10 items-center justify-center text-muted-foreground"><History size={20} /></Button>
+          <Button variant="flat" size="flat" aria-label="Thống kê" onClick={() => setPanel("stats")} className="card-flat flex h-10 w-10 items-center justify-center text-muted-foreground"><BarChart3 size={20} /></Button>
+          <Link to="/settings" aria-label="Cài đặt" className="card-flat flex h-10 w-10 items-center justify-center text-muted-foreground"><Settings size={20} /></Link>
+        </div>
       </header>
 
       {/* Quỹ Đệm */}
@@ -220,12 +228,15 @@ function Home() {
         </section>
       )}
 
+      <HistoryPanel open={panel === "history"} state={st} onClose={closePanel} />
+      <StatsPanel open={panel === "stats"} state={st} onClose={closePanel} />
+
       <AmountSheet
         open={sheet?.mode === "income"}
         title="Nạp Quỹ Đệm"
         accent="buffer"
         onClose={close}
-        onSubmit={(n) => setState((s) => ({ ...s, buffer: s.buffer + n, incomes: [{ amount: n, at: new Date().toISOString() }, ...s.incomes] }))}
+        onSubmit={(n) => setState((s) => addIncome(s, n))}
       />
 
       <AmountSheet
