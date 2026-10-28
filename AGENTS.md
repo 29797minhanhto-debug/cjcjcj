@@ -15,3 +15,4 @@
 - Editing an opening balance shifts the live balance by the difference — never overwrite money already moved by cycles.
 - Styling is flat by design: base layer forces no shadow/blur; use card-flat, stripe-*, field and icon-btn utilities from styles.css instead of ad-hoc classes so rows stay aligned.
 - Use the shared Button flat variant for cashflow actions, keeping layout classes explicit and theme colors semantic so palette changes preserve existing interactions.
+- Every income/expense is also written to the journal (state.log) by the same helper that records it; journal edits/deletes flow back to the buffer or live cycle — the history and stats windows read only the journal and the user-typed balance points.
